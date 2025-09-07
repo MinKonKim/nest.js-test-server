@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Catchmind Test Client</title>
+    <style>
+      body {
+        font-family: sans-serif;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        margin: 0;
+        padding: 20px;
+        box-sizing: border-box;
+      }
+      #game-container {
+        display: flex;
+        gap: 20px;
+      }
+      #canvas-container {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+      }
+      canvas {
+        border: 1px solid #ccc;
+      }
+      #chat-container {
+        width: 300px;
+        border: 1px solid #ccc;
+        padding: 10px;
+        display: flex;
+        flex-direction: column;
+        height: 400px;
+      }
+      #guess-log {
+        flex-grow: 1;
+        overflow-y: auto;
+        margin-bottom: 10px;
+        list-style-type: none;
+        padding: 0;
+      }
+      #guess-form {
+        display: flex;
+      }
+      #guess-input {
+        flex-grow: 1;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="status" style="text-align: center; margin-bottom: 10px; font-size: 1.2em;">
+      Connecting...
+    </div>
+
+    <div id="game-container">
+      <div id="canvas-container">
+        <canvas id="board" width="500" height="400"></canvas>
+      </div>
+      <div id="chat-container">
+        <ul id="guess-log"></ul>
+        <form id="guess-form" style="display: none;">
+          <input
+            type="text"
+            id="guess-input"
+            placeholder="Type your guess..."
+          />
+          <button type="submit">제출</button>
+        </form>
+      </div>
+    </div>
+
+    <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+    <script>
+      const socket = io('http://localhost:3000/game');
+      const roomId = 'room1';
+      const userName = 'user-' + Math.floor(Math.random() * 1000);
+
+      const statusDiv = document.getElementById('status');
+      const canvas = document.getElementById('board');
+      const ctx = canvas.getContext('2d');
+      const guessForm = document.getElementById('guess-form');
+      const guessInput = document.getElementById('guess-input');
+      const guessLog = document.getElementById('guess-log');
+
+      let myId = null;
+      let presenterId = null;
+      let drawing = false;
+
+      // 서버 연결 및 방 참가
+      socket.on('connect', () => {
+        myId = socket.id;
+        console.log('서버 연결됨:', myId);
+        addLog(`대기 중... (ID: ${userName})`);
+        socket.emit('joinGame', { roomId, userName });
+      });
+
+      // 출제자 지정 이벤트
+      socket.on('presenterAssigned', (data) => {
+        console.log('출제자 지정:', data);
+        presenterId = data.presenterId;
+        const amIPresenter = myId === presenterId;
+
+        if (amIPresenter) {
+          statusDiv.innerHTML = `당신이 출제자입니다.`;
+          canvas.style.cursor = 'crosshair';
+          guessForm.style.display = 'none';
+        } else {
+          statusDiv.textContent = `출제자(${data.presenterName})가 그리는 중...`;
+          canvas.style.cursor = 'not-allowed';
+          guessForm.style.display = 'flex';
+        }
+      });
+
+      // 라운드 시작 (출제자에게만 단어 전송)
+      socket.on('roundStarted', (data) => {
+        console.log('라운드 시작:', data);
+        statusDiv.innerHTML = `당신이 출제자입니다. <br>제시어: <strong>${data.word}</strong>`;
+      });
+
+      // 그리기 이벤트 리스너
+      canvas.addEventListener('mousedown', (e) => {
+        if (myId === presenterId) {
+          drawing = true;
+          draw(e);
+        }
+      });
+      canvas.addEventListener('mouseup', () => (drawing = false));
+      canvas.addEventListener('mousemove', draw);
+      canvas.addEventListener('mouseout', () => (drawing = false));
+
+      function draw(e) {
+        if (!drawing || myId !== presenterId) return;
+        const x = e.offsetX;
+        const y = e.offsetY;
+        ctx.fillStyle = 'black';
+        ctx.fillRect(x, y, 2, 2);
+        socket.emit('drawing', { roomId, data: { x, y } });
+      }
+
+      // 다른 클라이언트 그림 수신
+      socket.on('drawing:remote', (data) => {
+        ctx.fillStyle = 'black';
+        ctx.fillRect(data.data.x, data.data.y, 2, 2);
+      });
+
+      // 정답 제출 폼
+      guessForm.addEventListener('submit', (e) => {
+        e.preventDefault();
+        const guess = guessInput.value.trim();
+        if (guess) {
+          socket.emit('submitGuess', { roomId, guess });
+          guessInput.value = '';
+        }
+      });
+
+      // 정답 결과 수신
+      socket.on('guessResult', (data) => {
+        console.log('정답 결과:', data);
+        let message = `${data.from === myId ? '나' : data.playerName}의 추측 "${
+          data.guess
+        }": `;
+        if (data.correct) {
+          message += `정답! (+${data.score}점)`;
+          addLog(message, 'green');
+        } else {
+          message += '오답';
+          addLog(message, 'red');
+        }
+      });
+      
+      // 라운드 종료
+      socket.on('roundEnded', (data) => {
+        addLog(
+          `라운드 종료! ${data.winnerName}님이 정답을 맞혔습니다! (+${data.score}점)`,
+          'blue',
+        );
+      });
+
+      // 새 라운드 시작
+      socket.on('newRoundStarting', () => {
+        addLog('곧 새로운 라운드를 시작합니다...', 'blue');
+        // Clear canvas and log for the new round
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        guessLog.innerHTML = '';
+      });
+
+      // 유저 참가/퇴장/초기화
+      socket.on('userJoined', (data) => addLog(`새 유저 참가: ${data.name}`));
+      socket.on('userLeft', (data) => addLog(`유저 퇴장: ${data.id}`));
+      socket.on('initialState', (data) => {
+        console.log('초기 상태 받음:', data);
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        data.shapes.forEach((shape) => {
+          ctx.fillStyle = 'black';
+          ctx.fillRect(shape.x, shape.y, 2, 2);
+        });
+      });
+
+      function addLog(message, color = 'black') {
+        const li = document.createElement('li');
+        li.textContent = message;
+        li.style.color = color;
+        guessLog.appendChild(li);
+        guessLog.scrollTop = guessLog.scrollHeight;
+      }
+    </script>
+  </body>
+</html>
+
